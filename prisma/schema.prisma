@@ -1,0 +1,206 @@
+// Schema baseado no documento de Especificação Técnica v1.1
+// Rode `npm run prisma:migrate` após configurar DATABASE_URL no .env
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------- Empresas e usuários (lado cliente) ----------
+
+model Empresa {
+  id        String   @id @default(uuid())
+  nome      String
+  cnpj      String   @unique
+  status    StatusEmpresa @default(ATIVA)
+  criadoEm  DateTime @default(now())
+
+  usuarios  Usuario[]
+  chamados  Chamado[]
+}
+
+enum StatusEmpresa {
+  ATIVA
+  INATIVA
+}
+
+model Usuario {
+  id         String       @id @default(uuid())
+  empresaId  String
+  empresa    Empresa      @relation(fields: [empresaId], references: [id])
+  nome       String
+  email      String       @unique
+  telefone   String
+  senhaHash  String
+  papel      PapelUsuario @default(FUNCIONARIO)
+  status     StatusConta  @default(ATIVO)
+  criadoEm   DateTime     @default(now())
+
+  chamados   Chamado[]
+  mensagens  Mensagem[]
+}
+
+enum PapelUsuario {
+  FUNCIONARIO
+  GESTOR
+}
+
+enum StatusConta {
+  ATIVO
+  INATIVO
+}
+
+// ---------- Time de TI ----------
+
+model Tecnico {
+  id         String      @id @default(uuid())
+  nome       String
+  email      String      @unique
+  senhaHash  String
+  disponivel Boolean     @default(true) // usado no round-robin ponderado
+  status     StatusConta @default(ATIVO)
+  criadoEm   DateTime    @default(now())
+
+  grupos     TecnicoGrupo[]
+  chamados   Chamado[]
+  mensagens  Mensagem[]
+}
+
+model Grupo {
+  id             String           @id @default(uuid())
+  nome           String           @unique // ex: Redes, Software, Sistema Operacional
+
+  tecnicos       TecnicoGrupo[]
+  classificacoes Classificacao[]
+  chamados       Chamado[]
+}
+
+// tabela de junção N:N — um técnico pode atender mais de um grupo
+model TecnicoGrupo {
+  tecnicoId String
+  grupoId   String
+  tecnico   Tecnico @relation(fields: [tecnicoId], references: [id])
+  grupo     Grupo   @relation(fields: [grupoId], references: [id])
+
+  @@id([tecnicoId, grupoId])
+}
+
+model Classificacao {
+  id       String @id @default(uuid())
+  nome     String
+  grupoId  String
+  grupo    Grupo  @relation(fields: [grupoId], references: [id])
+
+  slaPolitica SlaPolitica?
+  chamados    Chamado[]
+}
+
+model SlaPolitica {
+  id                       String        @id @default(uuid())
+  classificacaoId          String        @unique
+  classificacao            Classificacao @relation(fields: [classificacaoId], references: [id])
+  tempoPrimeiraRespostaMin Int           // minutos até o 1º contato do técnico
+  tempoResolucaoMin        Int           // minutos até a resolução
+  calendario               Calendario    @default(COMERCIAL)
+}
+
+enum Calendario {
+  COMERCIAL
+  H24
+}
+
+// ---------- Chamado ----------
+
+model Chamado {
+  id                 String        @id @default(uuid())
+  numero             Int           @unique @default(autoincrement()) // número amigável (#2026-0001)
+
+  empresaId          String
+  empresa            Empresa       @relation(fields: [empresaId], references: [id])
+  usuarioId          String
+  usuario            Usuario       @relation(fields: [usuarioId], references: [id])
+  classificacaoId    String
+  classificacao      Classificacao @relation(fields: [classificacaoId], references: [id])
+  grupoId            String
+  grupo              Grupo         @relation(fields: [grupoId], references: [id])
+  tecnicoId          String?
+  tecnico            Tecnico?      @relation(fields: [tecnicoId], references: [id])
+
+  identificadorMaquina String      // campo livre — AnyDesk, patrimônio, hostname etc.
+  resumo               String
+  telefoneContato      String
+  prioridade           Prioridade  @default(MEDIA)
+  status               StatusChamado @default(ABERTO)
+
+  criadoEm            DateTime    @default(now())
+  atualizadoEm        DateTime    @updatedAt
+  resolvidoEm         DateTime?
+
+  // --- Rastreamento de SLA (ver seção 5 da especificação) ---
+  slaPrimeiraRespostaEm   DateTime?
+  slaPausadoDesde         DateTime?
+  slaTempoPausadoTotalMin Int       @default(0)
+  slaEstourado            Boolean?  // gravado no momento da resolução — valor histórico, não recalculado depois
+
+  mensagens           Mensagem[]
+  notificacoes        LogNotificacao[]
+
+  @@index([empresaId])
+  @@index([grupoId, status])
+  @@index([tecnicoId, status])
+}
+
+enum Prioridade {
+  BAIXA
+  MEDIA
+  ALTA
+  URGENTE
+}
+
+enum StatusChamado {
+  ABERTO
+  EM_ATENDIMENTO
+  AGUARDANDO_USUARIO
+  RESOLVIDO
+  FECHADO
+}
+
+model Mensagem {
+  id         String     @id @default(uuid())
+  chamadoId  String
+  chamado    Chamado    @relation(fields: [chamadoId], references: [id])
+  autorTipo  AutorTipo
+  usuarioId  String?
+  usuario    Usuario?   @relation(fields: [usuarioId], references: [id])
+  tecnicoId  String?
+  tecnico    Tecnico?   @relation(fields: [tecnicoId], references: [id])
+  mensagem   String
+  anexoUrl   String?
+  criadoEm   DateTime   @default(now())
+}
+
+enum AutorTipo {
+  USUARIO
+  TECNICO
+  SISTEMA
+}
+
+model LogNotificacao {
+  id           String   @id @default(uuid())
+  chamadoId    String
+  chamado      Chamado  @relation(fields: [chamadoId], references: [id])
+  destinatario String
+  tipoEvento   String   // ex: novo_chamado, nova_mensagem, mudanca_status
+  enviadoEm    DateTime @default(now())
+  statusEnvio  StatusEnvio
+}
+
+enum StatusEnvio {
+  SUCESSO
+  FALHA
+}
